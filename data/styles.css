@@ -1,0 +1,90 @@
+body {
+    background: #f4f4f4;
+    font-family: Arial, sans-serif;
+    margin: 0;
+}
+
+header {
+    background: #2c3e50;
+    padding: 20px;
+    color: white;
+    text-align: center;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 20px;
+    padding: 20px;
+}
+
+.card {
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    text-align: center;
+}
+
+.value {
+    font-size: 2em;
+    font-weight: bold;
+}
+
+.btn {
+    display: block;
+    width: 90%;
+    margin: 20px auto;
+    padding: 15px;
+    font-size: 1.1em;
+    border: none;
+    background: #3498db;
+    color: white;
+    border-radius: 10px;
+    cursor: pointer;
+}
+
+.btn:hover {
+    background: #2980b9;
+}
+
+/* Toggle */
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 60px;
+    height: 34px;
+}
+
+.switch input {
+    display: none;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background-color: #ccc;
+    border-radius: 34px;
+    transition: .4s;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 26px;
+    width: 26px;
+    left: 4px;
+    top: 4px;
+    background: white;
+    border-radius: 50%;
+    transition: .4s;
+}
+
+input:checked + .slider {
+    background: #2ecc71;
+}
+
+input:checked + .slider:before {
+    transform: translateX(26px);
+}

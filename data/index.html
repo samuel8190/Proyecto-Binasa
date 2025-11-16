@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BinasaMan Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+
+    <!-- SweetAlert2 -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+    <header>
+        <h1>BinasaMan Dashboard</h1>
+    </header>
+
+    <section class="grid">
+
+        <!-- Nivel del Agua -->
+        <div class="card">
+            <h2>💧 Nivel del Agua</h2>
+            <p id="nivelAgua" class="value">0%</p>
+        </div>
+
+        <!-- Estado de la Bomba -->
+        <div class="card">
+            <h2>🚿 Bomba</h2>
+            <p id="estadoBomba" class="value">OFF</p>
+
+            <label class="switch">
+                <input type="checkbox" id="toggleBomba">
+                <span class="slider"></span>
+            </label>
+        </div>
+
+        <!-- Sensor óptico -->
+        <div class="card">
+            <h2>🔦 Sensor Óptico (TCRT5000)</h2>
+            <p id="valorOptico" class="value">0%</p>
+        </div>
+
+    </section>
+
+    <!-- Popup gráfico -->
+    <button id="btnGrafica" class="btn">📊 Ver gráfica diaria</button>
+
+    <!-- Popup actuador -->
+    <button id="btnActuador" class="btn">⚙️ Actuador</button>
+
+    <script src="/script.js"></script>
+</body>
+</html>
