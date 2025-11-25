@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>BinasaMan Dashboard</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/style.css" />
 
     <!-- SweetAlert2 -->
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
@@ -19,22 +19,16 @@
     </header>
 
     <section class="grid">
-
         <!-- Nivel del Agua -->
         <div class="card">
             <h2>💧 Nivel del Agua</h2>
             <p id="nivelAgua" class="value">0%</p>
         </div>
-
-        <!-- Estado de la Bomba -->
+    
+        <!-- Bomba -->
         <div class="card">
-            <h2>🚿 Bomba</h2>
-            <p id="estadoBomba" class="value">OFF</p>
-
-            <label class="switch">
-                <input type="checkbox" id="toggleBomba">
-                <span class="slider"></span>
-            </label>
+            <h2>🛠 Bomba</h2>
+            <p id="pumpState" class="value">OFF</p>
         </div>
 
         <!-- Sensor óptico -->
@@ -45,10 +39,8 @@
 
     </section>
 
-    <!-- Popup gráfico -->
+    <!-- Botones -->
     <button id="btnGrafica" class="btn">📊 Ver gráfica diaria</button>
-
-    <!-- Popup actuador -->
     <button id="btnActuador" class="btn">⚙️ Actuador</button>
 
     <script src="/script.js"></script>

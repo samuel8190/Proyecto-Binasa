@@ -1,9 +1,3 @@
-/* main.cpp
-   BINASAMAN - UniversalTelegramBot integration version
-   Mantiene: WebServer, WebSockets, SPIFFS, Google Sheets, sensores, bomba, logs.
-   Reemplaza la parte Telegram por UniversalTelegramBot (bot.getUpdates)
-*/
-
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <WebServer.h>
@@ -11,550 +5,612 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <SPIFFS.h>
-
 #include <WiFiClientSecure.h>
 #include <UniversalTelegramBot.h>
+#include "time.h"
 
-// === USER CONFIGURATION ===
-
-// Telegram (token + chat id provistos)
+// === CONFIGURACIÓN ===
 const String TELEGRAM_TOKEN = "8561349984:AAEeukrg0mnGVkTtfDC_Dk143XyuyWsvJSA";
 const String TELEGRAM_CHAT_ID = "-1003421846114";
-const char* TG_HOST = "api.telegram.org";
-
-// Google Apps Script (tu URL)
 const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwXT9fR9JXHdoM63XyWFnNlpLW6bmnp8M9MnJmmoyD-6R82mSADm-V6z4kcspjHQ8Bypg/exec";
 
-// Pins (ajustar según tu placa)
-const int SENSOR_PINS[3] = {13, 12, 14}; // flotantes (low, mid, high)
-const int FOAM_SENSOR_PIN = 27;          // ADC pin (TCRT5000 AO)
-const int PUMP_PIN = 26;                 // MOSFET gate (activo HIGH)
+// Pines
+const int SENSOR_PINS[3] = {13, 12, 14};
+const int FOAM_SENSOR_PIN = 27;
+const int PUMP_PIN = 26;
+const int WATER_LEVEL_LEDS[3] = {12, 14, 27};
+const int PUMP_LED_PIN = 26;
+const int SHUTDOWN_BUTTON_PIN = 4;
+const int TEST_BUTTON_PIN = 5;
 
-// Umbrales / tiempos
-int FOAM_THRESHOLD = 70; // % (0..100) - puede setearse vía /foam/th/<val>
-const int WATER_HIGH_LEVEL = 90; // umbral para alerta (no usado en lógica principal)
-const unsigned long SHEETS_INTERVAL_MS = 60000UL; // 1 minuto fijo para Sheets
+// Configuración
+int FOAM_THRESHOLD = 70;
+const unsigned long SHEETS_INTERVAL_MS = 300000UL;
 unsigned long telegramReportIntervalMin = 30;
 
-// sampling
-const unsigned long SENSOR_SAMPLE_MS = 500;
-const unsigned long WEBSOCKET_SEND_MS = 2000;
-const int ADC_READ_SAMPLES = 6;
+// NTP Server
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = -3 * 3600;
+const int daylightOffset_sec = 0;
 
-// -------------------------
-// === GLOBALS / STATE ===
-// -------------------------
+// === VARIABLES GLOBALES ===
 WebServer server(80);
 WebSocketsServer webSocket(81);
-
-// Telegram objects
 WiFiClientSecure secureClient;
 UniversalTelegramBot bot(TELEGRAM_TOKEN, secureClient);
 
-bool sensorsState[3] = {false,false,false}; // low, mid, high
-int waterLevelPercent = 0; // 0 /25/50/75/100
+// Estados del sistema
+bool sensorsState[3] = {false, false, false};
+int waterLevelPercent = 0;
 int foamPercent = 0;
 bool pumpState = false;
-bool telegramOk = false;
+bool systemShutdown = false;
 
-// timing
-unsigned long lastSensorMillis = 0;
-unsigned long lastWsSendMillis = 0;
+// Timing
 unsigned long lastSheetSend = 0;
 unsigned long lastTelegramAutoSend = 0;
 unsigned long lastTelegramCheck = 0;
+bool dataChanged = false;
 
-// logs (ring buffer)
-#define LOG_CAP 120
-String logsArr[LOG_CAP];
-int logsIdx=0, logsCount=0;
+// === FUNCIONES MEJORADAS ===
 void addLog(const String &s) {
-  logsArr[logsIdx] = s;
-  logsIdx = (logsIdx + 1) % LOG_CAP;
-  if (logsCount < LOG_CAP) logsCount++;
-  Serial.println(s);
-}
-String getLogsJson() {
-  String j = "[";
-  int start = (logsIdx - logsCount + LOG_CAP) % LOG_CAP;
-  for (int i=0;i<logsCount;i++) {
-    String v = logsArr[(start + i) % LOG_CAP];
-    // escape simple
-    v.replace("\\","\\\\");
-    v.replace("\"","\\\"");
-    j += "\"" + v + "\"";
-    if (i < logsCount-1) j += ",";
-  }
-  j += "]";
-  return j;
+  Serial.println("📝 " + s);
 }
 
-// -------------------------
-// === UTIL: urlEncode ===
-// -------------------------
-String urlEncode(const String &str) {
-  String encoded = "";
-  char c;
-  char buf[4];
-  for (size_t i=0;i<str.length();i++){
-    c = str[i];
-    if ( (c >= '0' && c <= '9') ||
-         (c >= 'a' && c <= 'z') ||
-         (c >= 'A' && c <= 'Z') ||
-         c == '-' || c == '_' || c == '.' || c == '~' ) {
-      encoded += c;
-    } else if (c == ' ') {
-      encoded += "%20";
-    } else {
-      sprintf(buf, "%%%02X", (uint8_t)c);
-      encoded += buf;
-    }
-  }
-  return encoded;
+String getDateTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "00:00:00";
+  
+  char buffer[20];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(buffer);
 }
 
-// -------------------------
-// === NETWORK HELPERS ===
-// -------------------------
-void sendTelegramMessageRaw(const String &text) {
-  if (WiFi.status() != WL_CONNECTED) {
-    addLog("Telegram send skipped - no WiFi");
-    return;
-  }
-  // Use UniversalTelegramBot to send message
-  int res = bot.sendMessage(TELEGRAM_CHAT_ID, text, "Markdown");
-  if (res > 0) {
-    telegramOk = true;
-    addLog("Telegram sent");
-  } else {
-    telegramOk = false;
-    addLog("Telegram failed sendMessage");
-  }
+String getDate() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "1970-01-01";
+  
+  char buffer[11];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d", &timeinfo);
+  return String(buffer);
 }
 
-void sendTelegramMessage(const String &text) {
-  // wrapper with small size check
-  String t = text;
-  if (t.length() > 4000) t = t.substring(0,4000);
-  sendTelegramMessageRaw(t);
+String getTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "00:00:00";
+  
+  char buffer[9];
+  strftime(buffer, sizeof(buffer), "%H:%M:%S", &timeinfo);
+  return String(buffer);
 }
 
-// -------------------------
-// === Google Sheets logging ===
-// -------------------------
-void postToGoogleSheets(const String &eventType, int levelPercent, const String &extra = String()) {
-  if (WiFi.status() != WL_CONNECTED) {
-    addLog("Sheets skip - no WiFi");
-    return;
-  }
-  HTTPClient http;
-  http.begin(GOOGLE_SCRIPT_URL);
-  http.addHeader("Content-Type", "application/json");
-
-  StaticJsonDocument<256> doc;
-  doc["type"] = eventType;
-  doc["level"] = levelPercent;
-  doc["pump"] = pumpState ? "ON":"OFF";
-  doc["foam"] = foamPercent;
-  doc["extra"] = extra;
-
-  String payload;
-  serializeJson(doc, payload);
-  int code = http.POST(payload);
-  if (code == 200) addLog("Posted to Sheets: " + eventType);
-  else addLog("Sheets POST failed: " + String(code));
-  http.end();
-}
-
-// -------------------------
-// === SENSORS / ACTUATORS ===
-// -------------------------
 int readFoamADC() {
   long sum = 0;
-  for (int i=0;i<ADC_READ_SAMPLES;i++) {
+  for (int i = 0; i < 10; i++) {
     sum += analogRead(FOAM_SENSOR_PIN);
-    delay(2);
+    delay(1);
   }
-  int adc = (int)(sum / ADC_READ_SAMPLES);
-  // map ADC 0..4095 to 0..100 %
-  int pct = map(adc, 0, 4095, 0, 100);
-  if (pct < 0) pct = 0;
-  if (pct > 100) pct = 100;
-  return pct;
+  return map(sum / 10, 0, 4095, 0, 100);
 }
 
 int computeWaterPercent(bool low, bool mid, bool high) {
-  // Desired mapping: 0, 25, 50, 75, 100 (based on combos)
-  if (!low && !mid && !high) return 0;
-  // exact combos priority
-  if (low && !mid && !high) return 25;
-  if (low && mid && !high) return 50;
-  if (!low && mid && high) return 75;
-  if (low && mid && high) return 100;
-  // other combos fallback:
-  if (!low && !mid && high) return 75;
-  if (!low && mid && !high) return 50;
-  if (low && !mid && high) return 75;
-  // default: count-based fallback
-  int cnt = (low?1:0) + (mid?1:0) + (high?1:0);
-  if (cnt == 1) return 25;
-  if (cnt == 2) return 50;
-  if (cnt == 3) return 100;
-  return 0;
+  // Tabla de verdad optimizada
+  const int levels[] = {0, 25, 50, 75, 100, 75, 50, 75};
+  int index = (high ? 4 : 0) + (mid ? 2 : 0) + (low ? 1 : 0);
+  return levels[index];
 }
 
 void setPumpState(bool on, const String &reason = "") {
-  if (on == pumpState) return;
+  if (on == pumpState || systemShutdown) return;
+  
   pumpState = on;
-  digitalWrite(PUMP_PIN, pumpState ? HIGH : LOW);
-  addLog(String("Pump ") + (pumpState ? "ON":"OFF") + " - " + reason);
-  postToGoogleSheets(String("pump_activation"), waterLevelPercent, reason);
-  String tmsg = pumpState ? "⚙️ *BOMBA ENCENDIDA*":"🛑 *BOMBA APAGADA*";
-  tmsg += "\n💧 Nivel: " + String(waterLevelPercent) + "%\n🔦 Foam: " + String(foamPercent) + "%\n📝 " + reason;
-  sendTelegramMessage(tmsg);
-}
+  digitalWrite(PUMP_PIN, pumpState);
+  addLog("Bomba " + String(pumpState ? "ON" : "OFF") + " - " + reason);
+  dataChanged = true;
 
-// -------------------------
-// === WEB & WS ENDPOINTS ===
-// -------------------------
-void handleFileServe() {
-  String path = server.uri();
-  if (path == "/") path = "/index.html";
-  if (!SPIFFS.exists(path)) {
-    server.send(404, "text/plain", "Not found");
-    return;
+  if (WiFi.status() == WL_CONNECTED) {
+    String msg = pumpState ? "⚙️ *BOMBA ACTIVADA*" : "🛑 *BOMBA APAGADA*";
+    msg += "\n💧 Nivel: " + String(waterLevelPercent) + "%";
+    msg += "\n⏰ " + getTime();
+    bot.sendMessage(TELEGRAM_CHAT_ID, msg, "Markdown");
   }
-  File f = SPIFFS.open(path, "r");
-  String ct = "text/plain";
-  if (path.endsWith(".html")) ct = "text/html";
-  else if (path.endsWith(".js")) ct = "application/javascript";
-  else if (path.endsWith(".css")) ct = "text/css";
-  server.streamFile(f, ct);
-  f.close();
 }
 
-void handleStatusAPI() {
-  StaticJsonDocument<256> doc;
-  JsonArray arr = doc.createNestedArray("floats");
-  arr.add(sensorsState[0]?1:0);
-  arr.add(sensorsState[1]?1:0);
-  arr.add(sensorsState[2]?1:0);
-  doc["adc"] = foamPercent;
-  doc["pump"] = pumpState?1:0;
-  doc["foamTh"] = FOAM_THRESHOLD;
+void updateLEDs() {
+  if (systemShutdown) {
+    for (int i = 0; i < 3; i++) digitalWrite(WATER_LEVEL_LEDS[i], LOW);
+    digitalWrite(PUMP_LED_PIN, LOW);
+  } else {
+    digitalWrite(WATER_LEVEL_LEDS[0], waterLevelPercent >= 25);
+    digitalWrite(WATER_LEVEL_LEDS[1], waterLevelPercent >= 50);
+    digitalWrite(WATER_LEVEL_LEDS[2], waterLevelPercent >= 75);
+    digitalWrite(PUMP_LED_PIN, pumpState);
+  }
+}
+
+void checkForChanges() {
+  static int lastLevel = -1;
+  static int lastFoam = -1;
+  static bool lastPump = false;
+  
+  if (waterLevelPercent != lastLevel || foamPercent != lastFoam || pumpState != lastPump) {
+    dataChanged = true;
+    lastLevel = waterLevelPercent;
+    lastFoam = foamPercent;
+    lastPump = pumpState;
+  }
+}
+
+void broadcastWS() {
+  StaticJsonDocument<200> doc;
   doc["level"] = waterLevelPercent;
-  // include logs
-  JsonArray logs = doc.createNestedArray("logs");
-  int start = (logsIdx - logsCount + LOG_CAP) % LOG_CAP;
-  for (int i=0;i<logsCount;i++) logs.add(logsArr[(start+i)%LOG_CAP]);
+  doc["foam"] = foamPercent;
+  doc["pump"] = pumpState;
+  doc["shutdown"] = systemShutdown;
+  
+  JsonArray arr = doc.createNestedArray("sensors");
+  for (int i = 0; i < 3; i++) arr.add(sensorsState[i]);
+  
+  String out;
+  serializeJson(doc, out);
+  webSocket.broadcastTXT(out);
+}
+
+void sampleSensors() {
+  // Leer sensores con debug
+  bool s0 = (digitalRead(SENSOR_PINS[0]) == LOW);
+  bool s1 = (digitalRead(SENSOR_PINS[1]) == LOW);
+  bool s2 = (digitalRead(SENSOR_PINS[2]) == LOW);
+  
+  Serial.printf("🔍 Sensores: S0=%d, S1=%d, S2=%d -> ", s0, s1, s2);
+  
+  sensorsState[0] = s0;
+  sensorsState[1] = s1;
+  sensorsState[2] = s2;
+
+  // Calcular nivel
+  int newLevel = computeWaterPercent(s0, s1, s2);
+  Serial.printf("Nivel: %d%% - ", newLevel);
+  
+  if (newLevel != waterLevelPercent) {
+    waterLevelPercent = newLevel;
+    dataChanged = true;
+  }
+
+  // Sensor espuma
+  int rawFoam = analogRead(FOAM_SENSOR_PIN);
+  int newFoam = readFoamADC();
+  Serial.printf("Espuma RAW: %d -> %d%%\n", rawFoam, newFoam);
+  
+  if (abs(newFoam - foamPercent) >= 3) {
+    foamPercent = newFoam;
+    dataChanged = true;
+  }
+
+  // Control automático de espuma
+  if (!systemShutdown) {
+    if (foamPercent >= FOAM_THRESHOLD && !pumpState) {
+      setPumpState(true, "Detección automática de espuma");
+    } else if (foamPercent < (FOAM_THRESHOLD - 15) && pumpState) {
+      setPumpState(false, "Espuma controlada");
+    }
+  }
+}
+
+void sendToGoogleSheets() {
+  if (WiFi.status() != WL_CONNECTED || systemShutdown) return;
+  
+  HTTPClient http;
+  String payload = "date=" + getDate() + 
+                   "&time=" + getTime() +
+                   "&water_level=" + String(waterLevelPercent) +
+                   "&foam_level=" + String(foamPercent) +
+                   "&pump_state=" + String(pumpState);
+
+  http.begin(secureClient, GOOGLE_SCRIPT_URL);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  int code = http.POST(payload);
+  if (code > 0) {
+    Serial.println("✅ Datos enviados a Google Sheets");
+  } else {
+    Serial.println("❌ Error enviando a Google Sheets");
+  }
+  http.end();
+}
+
+// === SISTEMAS FÍSICOS ===
+void handleShutdownButton() {
+  static bool lastState = HIGH;
+  static unsigned long lastDebounce = 0;
+  
+  int reading = digitalRead(SHUTDOWN_BUTTON_PIN);
+  
+  if (reading != lastState) {
+    lastDebounce = millis();
+  }
+  
+  if ((millis() - lastDebounce) > 50) {
+    if (reading == LOW) {
+      systemShutdown = !systemShutdown;
+      
+      if (systemShutdown) {
+        setPumpState(false, "Apagado total del sistema");
+        addLog("⚠️ SISTEMA APAGADO");
+      } else {
+        addLog("✅ SISTEMA REANUDADO");
+      }
+      dataChanged = true;
+    }
+  }
+  lastState = reading;
+}
+
+void handleTestButton() {
+  static bool lastState = HIGH;
+  static unsigned long lastDebounce = 0;
+  
+  int reading = digitalRead(TEST_BUTTON_PIN);
+  
+  if (reading != lastState) {
+    lastDebounce = millis();
+  }
+  
+  if ((millis() - lastDebounce) > 50 && reading == LOW) {
+    addLog("🧪 Iniciando test del sistema...");
+    
+    // Test LEDs
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(WATER_LEVEL_LEDS[i], HIGH);
+      delay(150);
+    }
+    digitalWrite(PUMP_LED_PIN, HIGH);
+    delay(300);
+    
+    // Leer sensores durante test
+    sampleSensors();
+    
+    // Apagar LEDs
+    for (int i = 0; i < 3; i++) digitalWrite(WATER_LEVEL_LEDS[i], LOW);
+    digitalWrite(PUMP_LED_PIN, LOW);
+    
+    updateLEDs();
+    addLog("🧪 Test completado");
+  }
+  lastState = reading;
+}
+
+// === WEB SERVER MEJORADO ===
+void handleStatusAPI() {
+  StaticJsonDocument<300> doc;
+  doc["level"] = waterLevelPercent;
+  doc["foam"] = foamPercent;
+  doc["pump"] = pumpState;
+  doc["shutdown"] = systemShutdown;
+  doc["foamTh"] = FOAM_THRESHOLD;
+  doc["timestamp"] = getDateTime();
+  
+  JsonArray arr = doc.createNestedArray("sensors");
+  for (int i = 0; i < 3; i++) arr.add(sensorsState[i]);
+  
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
 }
 
-void handlePumpAPI() {
-  if (!server.hasArg("plain")) {
-    server.send(400, "text/plain", "body required");
+void handleHistory() {
+  if (!server.hasArg("date")) {
+    server.send(400, "application/json", "{\"error\":\"Falta fecha\"}");
     return;
   }
-  String body = server.arg("plain");
-  // expected JSON: {"action":"on"|"off"|"toggle"}
-  StaticJsonDocument<128> doc;
-  DeserializationError err = deserializeJson(doc, body);
-  if (err) {
-    server.send(400, "text/plain", "json parse error");
-    return;
-  }
-  String action = doc["action"] | "";
-  if (action == "on") setPumpState(true, "Manual via Web");
-  else if (action == "off") setPumpState(false, "Manual via Web");
-  else if (action == "toggle") setPumpState(!pumpState, "Manual toggle via Web");
-  else {
-    server.send(400, "text/plain", "invalid action");
-    return;
-  }
-  server.send(200, "text/plain", "OK");
+  
+  String date = server.arg("date");
+  addLog("📅 Solicitando historial para: " + date);
+  
+  // Datos de ejemplo - luego conectar con Google Sheets
+  String jsonResponse = "[";
+  jsonResponse += "{\"hora\":\"08:00\", \"agua\":25, \"espuma\":10},";
+  jsonResponse += "{\"hora\":\"10:00\", \"agua\":50, \"espuma\":25},"; 
+  jsonResponse += "{\"hora\":\"12:00\", \"agua\":75, \"espuma\":60},";
+  jsonResponse += "{\"hora\":\"14:00\", \"agua\":100, \"espuma\":30},";
+  jsonResponse += "{\"hora\":\"16:00\", \"agua\":75, \"espuma\":15},";
+  jsonResponse += "{\"hora\":\"18:00\", \"agua\":50, \"espuma\":10},";
+  jsonResponse += "{\"hora\":\"" + getTime() + "\", \"agua\":" + String(waterLevelPercent) + ", \"espuma\":" + String(foamPercent) + "}";
+  jsonResponse += "]";
+  
+  server.send(200, "application/json", jsonResponse);
 }
 
-void handleFoamThAPI() {
-  // GET /foam/th/<value>
-  String uri = server.uri(); // e.g. /foam/th/70
-  int lastSlash = uri.lastIndexOf('/');
-  if (lastSlash > 0) {
-    String v = uri.substring(lastSlash+1);
-    int val = v.toInt();
-    if (val < 0) val = 0;
-    if (val > 100) val = 100;
-    FOAM_THRESHOLD = val;
-    addLog("FOAM_THRESHOLD set to " + String(FOAM_THRESHOLD));
-    server.send(200, "text/plain", "OK");
-    return;
+void handleFileServe() {
+  String path = server.uri();
+  if (path == "/") path = "/index.html";
+  
+  if (SPIFFS.exists(path)) {
+    File f = SPIFFS.open(path, "r");
+    String ct = "text/plain";
+    if (path.endsWith(".css")) ct = "text/css";
+    else if (path.endsWith(".js")) ct = "application/javascript";
+    else if (path.endsWith(".html")) ct = "text/html";
+    
+    server.streamFile(f, ct);
+    f.close();
+  } else {
+    server.send(404, "text/plain", "Archivo no encontrado: " + path);
   }
-  server.send(400, "text/plain", "Bad request");
-}
-
-void handleWifiReset() {
-  // simple: restart - user should use WiFiManager AP to set new creds
-  server.send(200, "text/plain", "Rebooting to AP...");
-  delay(200);
-  ESP.restart();
 }
 
 void setupWebServer() {
   server.on("/", HTTP_GET, handleFileServe);
   server.on("/index.html", HTTP_GET, handleFileServe);
   server.on("/script.js", HTTP_GET, handleFileServe);
-  server.on("/styles.css", HTTP_GET, handleFileServe);
+  server.on("/style.css", HTTP_GET, handleFileServe);
   server.on("/status", HTTP_GET, handleStatusAPI);
-  server.on("/pump", HTTP_POST, handlePumpAPI);
-  server.on("/foam/th", HTTP_GET, handleFoamThAPI);
-  server.on("/wifi/reset", HTTP_GET, handleWifiReset);
+  server.on("/history", HTTP_GET, handleHistory);
+  
+  server.on("/control", HTTP_POST, []() {
+    String body = server.arg("plain");
+    DynamicJsonDocument doc(256);
+    DeserializationError error = deserializeJson(doc, body);
+    
+    if (error) {
+      server.send(400, "application/json", "{\"error\":\"JSON inválido\"}");
+      return;
+    }
+    
+    String action = doc["action"];
+    String response = "";
+    
+    if (action == "on" && !systemShutdown) {
+      setPumpState(true, "Control Web");
+      response = "{\"status\":\"ok\",\"message\":\"Bomba encendida\"}";
+    } else if (action == "off") {
+      setPumpState(false, "Control Web");
+      response = "{\"status\":\"ok\",\"message\":\"Bomba apagada\"}";
+    } else {
+      response = "{\"error\":\"Acción inválida o sistema apagado\"}";
+    }
+    
+    server.send(200, "application/json", response);
+  });
+  
   server.begin();
-  addLog("Web server started");
 }
 
-// -------------------------
-// === Telegram: polling & commands (REPLACED) ===
-// -------------------------
+// === TELEGRAM BOT MEJORADO ===
+void sendCompleteStatusToTelegram(String chat_id = TELEGRAM_CHAT_ID) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  String message = "📡 *Estado Completo del Sistema*\n\n";
+  message += "📊 *SENSORES:*\n";
+  message += "💧 Nivel Agua: " + String(waterLevelPercent) + "%\n";
+  message += "🌿 Nivel Biomasa: " + String(foamPercent) + "%\n\n";
+  
+  message += "⚡ *ACTUADORES:*\n";
+  message += "• Bomba: " + String(pumpState ? "✅ ENCENDIDA" : "❌ APAGADA") + "\n";
+  message += "• Sistema: " + String(systemShutdown ? "🔴 APAGADO" : "🟢 ACTIVO") + "\n\n";
+  
+  message += "⏰ " + getDateTime();
+  
+  bot.sendMessage(chat_id, message, "Markdown");
+}
 
-// New handler using UniversalTelegramBot
-void processTelegramText(const String &text, const String &fromId) {
+void processTelegramCommand(const String &text, const String &chat_id) {
   String cmd = text;
   cmd.toLowerCase();
-  addLog("TG cmd from " + fromId + ": " + cmd);
 
-  // /menu
-  if (cmd == "/menu" || cmd == "/start" || cmd == "/help") {
-    String m = "📋 *BINASAMAN - Menú*\n\n";
-    m += "🔎 /status - Estado del sistema\n";
-    m += "⚙️ /pump_on - Encender bomba\n";
-    m += "🛑 /pump_off - Apagar bomba\n";
-    m += "🔁 /pump_toggle - Alternar bomba\n";
-    m += "⏱ /set_interval <min> - Intervalo reportes Telegram (min)\n";
-    m += "📈 /chart_today - Ver gráfica del día\n";
-    m += "📅 /chart_date YYYY-MM-DD - Ver gráfica por fecha\n";
-    m += "\nSi ingresás mal un comando, te diré que uses /menu.";
-    sendTelegramMessage(m);
+  if (cmd == "/start" || cmd == "/menu") {
+    String reply = "📋 *BINASAMAN - Menú de Comandos:*\n\n";
+    reply += "📊 /datasensores - Datos actuales + Actuadores\n";
+    reply += "⏱️ /setinterval [min] - Cambiar intervalo\n";
+    reply += "📈 /status - Estado general\n";
+    reply += "🖥️ /infodevices - Info del dispositivo\n";
+    reply += "⚙️ /pump_on - Encender bomba manualmente\n";
+    reply += "🛑 /pump_off - Apagar bomba manualmente\n";
+    reply += "🔧 /test - Test del sistema\n";
+    
+    bot.sendMessage(chat_id, reply, "Markdown");
+    return;
+  }
+
+  if (cmd == "/datasensores") {
+    sendCompleteStatusToTelegram(chat_id);
     return;
   }
 
   if (cmd == "/status") {
-    String s = "📡 *BINASAMAN - Estado*\n\n";
-    s += "💧 Nivel: " + String(waterLevelPercent) + "%\n";
-    s += "🔦 Sensor óptico: " + String(foamPercent) + "% (thr " + String(FOAM_THRESHOLD) + "%)\n";
-    s += "⚙️ Bomba: " + String(pumpState ? "ENCENDIDA":"APAGADA") + "\n";
-    s += "🔢 Sensores: " + String(sensorsState[0]?1:0) + String(sensorsState[1]?1:0) + String(sensorsState[2]?1:0);
-    sendTelegramMessage(s);
+    String message = "📈 *Estado General:*\n\n";
+    message += "⏱️ Intervalo Reportes: " + String(telegramReportIntervalMin) + " min\n";
+    message += "📶 WiFi: " + String(WiFi.RSSI()) + " dBm\n";
+    message += "📡 IP: " + WiFi.localIP().toString() + "\n";
+    message += "🔌 Sistema: " + String(systemShutdown ? "APAGADO 🔴" : "ACTIVO 🟢") + "\n";
+    message += "💧 Nivel Agua: " + String(waterLevelPercent) + "%\n";
+    message += "🌿 Biomasa: " + String(foamPercent) + "%\n";
+    message += "⏰ " + getDateTime();
+    
+    bot.sendMessage(chat_id, message, "Markdown");
     return;
   }
 
-  if (cmd == "/pump_on") {
-    setPumpState(true, "Cmd Telegram /pump_on");
+  if (cmd == "/infodevices") {
+    uint64_t chipid = ESP.getEfuseMac();
+    String chipIdStr = String((uint32_t)(chipid >> 32), HEX) + String((uint32_t)chipid, HEX);
+    
+    String message = "🖥️ *Información del Dispositivo*\n\n";
+    message += "💻 *Chip ID:* `" + chipIdStr + "`\n";
+    message += "📶 *RSSI:* " + String(WiFi.RSSI()) + " dBm\n";
+    message += "⏱️ *Uptime:* " + String(millis() / 1000) + "s\n";
+    message += "🔁 *Próximo reporte:* " + String(telegramReportIntervalMin) + " min\n";
+    message += "📡 *WiFi:* " + WiFi.SSID() + "\n";
+    message += "🌍 *IP:* " + WiFi.localIP().toString() + "\n";
+    message += "🔢 *MAC:* " + WiFi.macAddress() + "\n";
+    
+    bot.sendMessage(chat_id, message, "Markdown");
     return;
   }
+
+  if (cmd == "/pump_on" && !systemShutdown) {
+    setPumpState(true, "Comando Telegram");
+    bot.sendMessage(chat_id, "✅ *Bomba encendida manualmente*", "Markdown");
+    return;
+  } 
+
   if (cmd == "/pump_off") {
-    setPumpState(false, "Cmd Telegram /pump_off");
-    return;
-  }
-  if (cmd == "/pump_toggle") {
-    setPumpState(!pumpState, "Cmd Telegram /pump_toggle");
+    setPumpState(false, "Comando Telegram");
+    bot.sendMessage(chat_id, "🛑 *Bomba apagada manualmente*", "Markdown");
     return;
   }
 
-  if (cmd.startsWith("/set_interval")) {
-    // parse number
+  if (cmd == "/test") {
+    bot.sendMessage(chat_id, "🧪 *Ejecutando test del sistema...*", "Markdown");
+    handleTestButton();
+    delay(2000);
+    sendCompleteStatusToTelegram(chat_id);
+    return;
+  }
+
+  if (cmd.startsWith("/setinterval")) {
     int sp = cmd.indexOf(' ');
-    if (sp < 0) {
-      sendTelegramMessage("Uso: /set_interval <minutos>");
-      return;
+    if (sp > 0) {
+      int newInterval = cmd.substring(sp+1).toInt();
+      if (newInterval > 0 && newInterval <= 1440) {
+        telegramReportIntervalMin = newInterval;
+        bot.sendMessage(chat_id, "⏱️ *Intervalo cambiado a " + String(newInterval) + " minutos*", "Markdown");
+      } else {
+        bot.sendMessage(chat_id, "⚠️ *Intervalo inválido (1-1440 min)*", "Markdown");
+      }
+    } else {
+      bot.sendMessage(chat_id, "⚠️ *Uso: /setinterval [minutos]*", "Markdown");
     }
-    String num = cmd.substring(sp+1);
-    int m = num.toInt();
-    if (m < 0) { sendTelegramMessage("Valor invalido"); return; }
-    telegramReportIntervalMin = (unsigned long)m;
-    sendTelegramMessage("⏱ Intervalo Telegram ajustado a " + String(m) + " min");
-    addLog("Telegram interval set to " + String(m) + " min");
     return;
   }
 
-  // unknown
-  sendTelegramMessage("❌ *Comando no reconocido*\nUsá /menu para ver todos los comandos disponibles.");
+  bot.sendMessage(chat_id, "❓ *Comando no reconocido*\nUsa /menu para ver las opciones", "Markdown");
 }
 
-// handle new messages from bot (UniversalTelegramBot)
-void handleNewMessages(int numNew) {
-  for (int i = 0; i < numNew; i++) {
-    String chat_id = String(bot.messages[i].chat_id);
-    String from_name = bot.messages[i].from_name;
-    String text = bot.messages[i].text;
-
-    addLog("TG new msg from " + chat_id + ": " + text);
-
-    // only accept messages from the configured chat (group/chat id)
-    if (chat_id == TELEGRAM_CHAT_ID && text.length() > 0) {
-      processTelegramText(text, chat_id);
-    } else {
-      addLog("Message from other chat: " + chat_id);
-    }
-  }
-}
-
-// -------------------------
-// === CORE: loop sampling ===
-// -------------------------
-void sampleSensors() {
-  // read floats (INPUT_PULLUP assumed)
-  bool s0 = (digitalRead(SENSOR_PINS[0]) == LOW);
-  bool s1 = (digitalRead(SENSOR_PINS[1]) == LOW);
-  bool s2 = (digitalRead(SENSOR_PINS[2]) == LOW);
-  sensorsState[0] = s0; sensorsState[1] = s1; sensorsState[2] = s2;
-
-  // compute water level %
-  int newLevel = computeWaterPercent(s0,s1,s2);
-  if (newLevel != waterLevelPercent) {
-    waterLevelPercent = newLevel;
-    addLog("Nivel cambiado: " + String(waterLevelPercent) + "%");
-    // send an entry to sheets on level change
-    postToGoogleSheets("water_level", waterLevelPercent, "change_event");
-  }
-
-  // foam ADC
-  int newFoam = readFoamADC();
-  if (abs(newFoam - foamPercent) >= 3) {
-    foamPercent = newFoam;
-  }
-
-  // auto anti-foam logic
-  if (foamPercent >= FOAM_THRESHOLD && !pumpState) {
-    setPumpState(true, "Auto foam detect");
-  } else if (foamPercent < (FOAM_THRESHOLD - 10) && pumpState) {
-    setPumpState(false, "Auto foam cleared");
-  }
-}
-
-void broadcastWS() {
-  StaticJsonDocument<256> doc;
-  doc["level"] = waterLevelPercent;
-  doc["foam"] = foamPercent;
-  doc["pump"] = pumpState ? 1 : 0;
-  JsonArray arr = doc.createNestedArray("sensors");
-  arr.add(sensorsState[0]?1:0);
-  arr.add(sensorsState[1]?1:0);
-  arr.add(sensorsState[2]?1:0);
-  String out; serializeJson(doc, out);
-  webSocket.broadcastTXT(out);
-}
-
-// -------------------------
-// === SETUP / LOOP ===
-// -------------------------
+// === SETUP OPTIMIZADO ===
 void setup() {
   Serial.begin(115200);
-  delay(100);
-
-  pinMode(SENSOR_PINS[0], INPUT_PULLUP);
-  pinMode(SENSOR_PINS[1], INPUT_PULLUP);
-  pinMode(SENSOR_PINS[2], INPUT_PULLUP);
+  Serial.println("\n🚀 Iniciando BINASAMAN...");
+  
+  // Configurar pines
+  for (int i = 0; i < 3; i++) {
+    pinMode(SENSOR_PINS[i], INPUT_PULLUP);
+    pinMode(WATER_LEVEL_LEDS[i], OUTPUT);
+    digitalWrite(WATER_LEVEL_LEDS[i], LOW);
+  }
+  
   pinMode(PUMP_PIN, OUTPUT);
   digitalWrite(PUMP_PIN, LOW);
+  pinMode(SHUTDOWN_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
 
+  // SPIFFS
   if (!SPIFFS.begin(true)) {
-    Serial.println("SPIFFS mount failed");
+    Serial.println("❌ Error al montar SPIFFS");
   }
 
-  // WiFi Manager
+  // WiFi
   WiFiManager wm;
   wm.setConfigPortalTimeout(180);
+  
   if (!wm.autoConnect("BINASAMAN-Setup")) {
-    // failed, restart
-    Serial.println("WiFi failed");
+    Serial.println("❌ Fallo de conexión, reiniciando...");
     ESP.restart();
   }
-  Serial.println("Connected to WiFi: " + WiFi.localIP().toString());
 
-  // setup WS and HTTP
+  Serial.println("✅ WiFi conectado: " + WiFi.localIP().toString());
+
+  // Configurar tiempo
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  // Servidores
   webSocket.begin();
-  webSocket.onEvent([](uint8_t num, WStype_t type, uint8_t * payload, size_t length){
+  webSocket.onEvent([](uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     if (type == WStype_TEXT) {
-        StaticJsonDocument<128> j;
-        DeserializationError e = deserializeJson(j, payload, length);
-        if (!e && j.containsKey("type") && String(j["type"].as<const char*>()) == "control") {
-            if (j.containsKey("pump")) {
-                bool p = (j["pump"].as<int>() != 0);
-                setPumpState(p, "WebSocket control");
-            }
+      DynamicJsonDocument doc(128);
+      if (!deserializeJson(doc, payload) && doc["type"] == "control") {
+        if (doc.containsKey("pump")) {
+          setPumpState(doc["pump"], "WebSocket");
         }
+      }
     }
-    else if (type == WStype_CONNECTED) {
-        // Si querés poner un log:
-        addLog("WS client conectado");
-    }
-});
-
-
+  });
+  
   setupWebServer();
-  addLog("System started");
+  secureClient.setInsecure();
 
-  // Secure client for Telegram
-  secureClient.setInsecure(); // skip cert validation (common on ESP32)
-  // send startup message via UniversalTelegramBot
-  sendTelegramMessage("🚀 *BINASAMAN iniciado*\nIP: " + WiFi.localIP().toString());
-
-  lastSensorMillis = millis();
-  lastWsSendMillis = millis();
-  lastSheetSend = millis();
-  lastTelegramAutoSend = millis();
-  lastTelegramCheck = millis();
+  // Mensaje de inicio
+  String startMsg = "⚙️ *Sistema Iniciado: Monitoreo de DHT22*\n\n";
+  startMsg += "🔧 Motivo: ⚙ Power On\n";
+  startMsg += "🌍 IP: " + WiFi.localIP().toString() + "\n";
+  startMsg += "📶 WiFi: " + WiFi.SSID() + "\n";
+  startMsg += "🔢 MAC: " + WiFi.macAddress();
+  
+  bot.sendMessage(TELEGRAM_CHAT_ID, startMsg, "Markdown");
+  addLog("Sistema iniciado correctamente");
 }
 
+// === LOOP OPTIMIZADO ===
 void loop() {
   server.handleClient();
   webSocket.loop();
 
+  // Botones físicos
+  handleShutdownButton();
+  handleTestButton();
+
   unsigned long now = millis();
 
-  // sampling sensors
+  // Sensores (cada 1 segundo)
   static unsigned long lastSensor = 0;
-  if (now - lastSensor >= SENSOR_SAMPLE_MS) {
+  if (!systemShutdown && (now - lastSensor >= 1000)) {
     lastSensor = now;
     sampleSensors();
+    checkForChanges();
   }
 
-  // websocket broadcast
-  static unsigned long lastWs = 0;
-  if (now - lastWs >= WEBSOCKET_SEND_MS) {
-    lastWs = now;
+  // WebSocket (solo cuando hay cambios)
+  if (dataChanged) {
     broadcastWS();
+    dataChanged = false;
   }
 
-  // Google Sheets fixed periodic send every 1 minute
-  static unsigned long lastSheet = 0;
-  if (now - lastSheet >= SHEETS_INTERVAL_MS) {
-    lastSheet = now;
-    postToGoogleSheets("periodic", waterLevelPercent, "periodic_send");
+  // LEDs (cada 100ms)
+  static unsigned long lastLED = 0;
+  if (now - lastLED >= 100) {
+    lastLED = now;
+    updateLEDs();
   }
 
-  // Telegram: check for new messages periodically (every 2s)
-  if (now - lastTelegramCheck >= 2000) {
+  // Google Sheets (cada 5 minutos)
+  if (!systemShutdown && (now - lastSheetSend >= SHEETS_INTERVAL_MS)) {
+    lastSheetSend = now;
+    sendToGoogleSheets();
+  }
+
+  // Telegram mensajes (cada 3 segundos)
+  if (now - lastTelegramCheck >= 3000) {
     lastTelegramCheck = now;
     int numNew = bot.getUpdates(bot.last_message_received + 1);
-    if (numNew > 0) {
-      addLog("Telegram updates: " + String(numNew));
-      handleNewMessages(numNew);
+    for (int i = 0; i < numNew; i++) {
+      if (String(bot.messages[i].chat_id) == TELEGRAM_CHAT_ID) {
+        processTelegramCommand(bot.messages[i].text, bot.messages[i].chat_id);
+      }
     }
   }
 
-  // auto telegram report if interval configured (>0)
-  if (telegramReportIntervalMin > 0) {
-    unsigned long intervalMs = telegramReportIntervalMin * 60000UL;
-    if (now - lastTelegramAutoSend >= intervalMs) {
+  // Reporte automático Telegram
+  if (!systemShutdown && telegramReportIntervalMin > 0) {
+    if (now - lastTelegramAutoSend >= telegramReportIntervalMin * 60000UL) {
       lastTelegramAutoSend = now;
-      // create and send summary
-      String s = "📡 *BINASAMAN - Reporte automático*\n";
-      s += "💧 Nivel: " + String(waterLevelPercent) + "%\n";
-      s += "🔦 Foam: " + String(foamPercent) + "%\n";
-      s += "⚙️ Bomba: " + String(pumpState ? "ENCENDIDA":"APAGADA");
-      sendTelegramMessage(s);
+      String report = "📡 *REPORTE AUTOMÁTICO*\n\n";
+      report += "💧 Nivel Agua: " + String(waterLevelPercent) + "%\n";
+      report += "🌿 Nivel Biomasa: " + String(foamPercent) + "%\n";
+      report += "⚙️ Bomba: " + String(pumpState ? "ENCENDIDA" : "APAGADA") + "\n";
+      report += "⏰ " + getDateTime();
+      bot.sendMessage(TELEGRAM_CHAT_ID, report, "Markdown");
     }
   }
+
+  delay(10);
 }

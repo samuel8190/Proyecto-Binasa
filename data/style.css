@@ -2,6 +2,7 @@ body {
     background: #f4f4f4;
     font-family: Arial, sans-serif;
     margin: 0;
+    padding: 0;
 }
 
 header {
@@ -9,6 +10,7 @@ header {
     padding: 20px;
     color: white;
     text-align: center;
+    margin: 0;
 }
 
 .grid {
@@ -24,16 +26,24 @@ header {
     border-radius: 12px;
     box-shadow: 0 2px 6px rgba(0,0,0,0.2);
     text-align: center;
+    transition: transform 0.2s;
+}
+
+.card:hover {
+    transform: translateY(-2px);
 }
 
 .value {
     font-size: 2em;
     font-weight: bold;
+    margin: 10px 0;
+    color: #2c3e50;
 }
 
 .btn {
     display: block;
     width: 90%;
+    max-width: 300px;
     margin: 20px auto;
     padding: 15px;
     font-size: 1.1em;
@@ -42,49 +52,18 @@ header {
     color: white;
     border-radius: 10px;
     cursor: pointer;
+    transition: background 0.3s;
 }
 
 .btn:hover {
     background: #2980b9;
 }
 
-/* Toggle */
-.switch {
-    position: relative;
-    display: inline-block;
-    width: 60px;
-    height: 34px;
+/* Estados de la bomba */
+#pumpState {
+    color: #e74c3c; /* Rojo cuando está OFF */
 }
 
-.switch input {
-    display: none;
-}
-
-.slider {
-    position: absolute;
-    cursor: pointer;
-    inset: 0;
-    background-color: #ccc;
-    border-radius: 34px;
-    transition: .4s;
-}
-
-.slider:before {
-    position: absolute;
-    content: "";
-    height: 26px;
-    width: 26px;
-    left: 4px;
-    top: 4px;
-    background: white;
-    border-radius: 50%;
-    transition: .4s;
-}
-
-input:checked + .slider {
-    background: #2ecc71;
-}
-
-input:checked + .slider:before {
-    transform: translateX(26px);
+#pumpState.on {
+    color: #27ae60; /* Verde cuando está ON */
 }
