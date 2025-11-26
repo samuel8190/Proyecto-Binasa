@@ -8,22 +8,34 @@
 #include <WiFiClientSecure.h>
 #include <UniversalTelegramBot.h>
 #include "time.h"
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <LiquidCrystal_I2C.h>  // ← NUEVA LIBRERÍA PARA LCD
 
 // === CONFIGURACIÓN ===
 const String TELEGRAM_TOKEN = "8561349984:AAEeukrg0mnGVkTtfDC_Dk143XyuyWsvJSA";
 const String TELEGRAM_CHAT_ID = "-1003421846114";
-const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwXT9fR9JXHdoM63XyWFnNlpLW6bmnp8M9MnJmmoyD-6R82mSADm-V6z4kcspjHQ8Bypg/exec";
+const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwXT9fR9JXHdoM63XyWFnNlpLW6bmnp8M9MnJmmoyD-6R82mSADm-V6z4z4kcspjHQ8Bypg/exec";
 
-// Pines
-const int SENSOR_PINS[3] = {13, 12, 14};
-const int FOAM_SENSOR_PIN = 27;
-const int PUMP_PIN = 26;
-const int WATER_LEVEL_LEDS[3] = {12, 14, 27};
-const int PUMP_LED_PIN = 26;
-const int SHUTDOWN_BUTTON_PIN = 4;
-const int TEST_BUTTON_PIN = 5;
+const int SENSOR_PINS[3] = {12, 14, 27};        // Sensores de agua (INPUT)
+const int FOAM_SENSOR_PIN = 32;                 // Sensor de espuma (ANALOG) - GPIO32
+const int PUMP_PIN = 13;                        // Bomba (OUTPUT) - sin cambios
+const int WATER_LEVEL_LEDS[3] = {25, 26, 33};   // LEDs visuales nivel agua (OUTPUT) 
+const int PUMP_LED_PIN = 15;                    // LED visual de bomba (OUTPUT) - sin cambios
+const int SHUTDOWN_BUTTON_PIN = 4;              // Botón (INPUT) - sin cambios
+const int TEST_BUTTON_PIN = 5;                  // Botón (INPUT) - sin cambios
 
-// Configuración
+// Configuración OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Configuración LCD I2C
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // Dirección I2C 0x27, 16 columnas, 2 filas
+
+// Configuración del sistema
 int FOAM_THRESHOLD = 70;
 const unsigned long SHEETS_INTERVAL_MS = 300000UL;
 unsigned long telegramReportIntervalMin = 30;
@@ -45,12 +57,167 @@ int waterLevelPercent = 0;
 int foamPercent = 0;
 bool pumpState = false;
 bool systemShutdown = false;
+bool manualPumpControl = false;
 
 // Timing
 unsigned long lastSheetSend = 0;
 unsigned long lastTelegramAutoSend = 0;
 unsigned long lastTelegramCheck = 0;
 bool dataChanged = false;
+
+// === FUNCIONES LCD I2C ===
+void initLCD() {
+  lcd.init();                       // Inicializar LCD
+  lcd.backlight();                  // Encender luz de fondo
+  lcd.setCursor(0, 0);
+  lcd.print("Sensores: Ok    ");    // Mensaje inicial
+  lcd.setCursor(0, 1);
+  lcd.print("Bomba: Ok       ");
+}
+
+void updateLCDNormal() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  
+  // Verificar estado de sensores
+  bool sensorsConnected = true;
+  for (int i = 0; i < 3; i++) {
+    if (digitalRead(SENSOR_PINS[i]) == HIGH) { // Si está HIGH, sensor desconectado
+      sensorsConnected = false;
+      break;
+    }
+  }
+  
+  if (sensorsConnected) {
+    lcd.print("Sensores: Ok    ");
+  } else {
+    lcd.print("Sensores: NoCon");
+  }
+  
+  lcd.setCursor(0, 1);
+  
+  // Verificar estado de bomba
+  bool pumpConnected = (digitalRead(PUMP_PIN) == LOW); // Asumiendo que LOW significa bomba ok
+  
+  if (pumpConnected && !systemShutdown) {
+    lcd.print("Bomba: ");
+    lcd.print(pumpState ? "ON " : "OFF");
+    lcd.print("       ");
+  } else if (systemShutdown) {
+    lcd.print("Sistema Apagado");
+  } else {
+    lcd.print("Bomba: Error   ");
+  }
+}
+
+void updateLCDTesting() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Testeando el   ");
+  lcd.setCursor(0, 1);
+  lcd.print("Sistema...     ");
+}
+
+void updateLCDTestResult(bool sensorsOK, bool pumpOK, bool wifiOK) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  
+  if (sensorsOK) {
+    lcd.print("Sensores: Ok    ");
+  } else {
+    lcd.print("Sensores: Error ");
+  }
+  
+  lcd.setCursor(0, 1);
+  
+  if (pumpOK && wifiOK) {
+    lcd.print("Bomba: Ok W:Ok ");
+  } else if (pumpOK && !wifiOK) {
+    lcd.print("Bomba: Ok W:No ");
+  } else if (!pumpOK && wifiOK) {
+    lcd.print("Bomba: Error W:Ok");
+  } else {
+    lcd.print("Bomba: Error W:No");
+  }
+}
+
+// === FUNCIONES OLED ===
+void initOLED() {
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("❌ Error al iniciar OLED");
+    return;
+  }
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.println("Proyecto");
+  display.println("Binasa");
+  display.display();
+  delay(2000);
+}
+
+void updateOLED() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  
+  if (systemShutdown) {
+    display.setTextSize(2);
+    display.setCursor(10, 20);
+    display.println("SISTEMA");
+    display.setCursor(30, 40);
+    display.println("APAGADO");
+  } else {
+    display.println("Nivel Agua: " + String(waterLevelPercent) + "%");
+    display.println("Biomasa: " + String(foamPercent) + "%");
+    display.println("Bomba: " + String(pumpState ? "ON" : "OFF"));
+    display.println("Modo: " + String(manualPumpControl ? "MANUAL" : "AUTO"));
+    display.println("IP: " + WiFi.localIP().toString());
+    
+    // Obtener y mostrar la hora
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      char timeStr[9];
+      strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+      display.println(timeStr);
+    } else {
+      display.println("Hora: --:--:--");
+    }
+  }
+  display.display();
+}
+
+void showTestResultOnOLED(bool sensorsOK, bool pumpOK, bool wifiOK) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("=== TEST SISTEMA ===");
+  display.println("");
+  
+  if (sensorsOK) {
+    display.println("✅ Sensores: OK");
+  } else {
+    display.println("❌ Sensores: FALLO");
+  }
+  
+  if (pumpOK) {
+    display.println("✅ Bomba: OK");
+  } else {
+    display.println("❌ Bomba: FALLO");
+  }
+  
+  if (wifiOK) {
+    display.println("✅ WiFi: OK");
+  } else {
+    display.println("❌ WiFi: FALLO");
+  }
+  
+  display.println("");
+  display.println("Sistema: " + String(systemShutdown ? "APAGADO" : "ACTIVO"));
+  
+  display.display();
+}
 
 // === FUNCIONES MEJORADAS ===
 void addLog(const String &s) {
@@ -104,14 +271,27 @@ void setPumpState(bool on, const String &reason = "") {
   if (on == pumpState || systemShutdown) return;
   
   pumpState = on;
+  
+  // Determinar si es control manual o automático
+  if (reason == "Control Web" || reason == "Comando Telegram" || reason == "WebSocket") {
+    manualPumpControl = true;
+    addLog("🔧 Modo MANUAL activado");
+  } else if (reason.indexOf("automática") >= 0 || reason.indexOf("controlada") >= 0 || reason == "Test del sistema") {
+    manualPumpControl = false;
+  }
+  
   digitalWrite(PUMP_PIN, pumpState);
+  digitalWrite(PUMP_LED_PIN, pumpState);
   addLog("Bomba " + String(pumpState ? "ON" : "OFF") + " - " + reason);
   dataChanged = true;
 
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED && (reason == "Control Web" || reason == "Comando Telegram")) {
     String msg = pumpState ? "⚙️ *BOMBA ACTIVADA*" : "🛑 *BOMBA APAGADA*";
     msg += "\n💧 Nivel: " + String(waterLevelPercent) + "%";
+    msg += "\n🌿 Biomasa: " + String(foamPercent) + "%";
     msg += "\n⏰ " + getTime();
+    msg += "\n🔧 ";
+    msg += manualPumpControl ? "Control Manual" : "Control Automático";
     bot.sendMessage(TELEGRAM_CHAT_ID, msg, "Markdown");
   }
 }
@@ -147,6 +327,7 @@ void broadcastWS() {
   doc["foam"] = foamPercent;
   doc["pump"] = pumpState;
   doc["shutdown"] = systemShutdown;
+  doc["manualMode"] = manualPumpControl;
   
   JsonArray arr = doc.createNestedArray("sensors");
   for (int i = 0; i < 3; i++) arr.add(sensorsState[i]);
@@ -187,8 +368,8 @@ void sampleSensors() {
     dataChanged = true;
   }
 
-  // Control automático de espuma
-  if (!systemShutdown) {
+  // Control automático de espuma - SOLO si no hay control manual
+  if (!systemShutdown && !manualPumpControl) {
     if (foamPercent >= FOAM_THRESHOLD && !pumpState) {
       setPumpState(true, "Detección automática de espuma");
     } else if (foamPercent < (FOAM_THRESHOLD - 15) && pumpState) {
@@ -257,7 +438,10 @@ void handleTestButton() {
   }
   
   if ((millis() - lastDebounce) > 50 && reading == LOW) {
-    addLog("🧪 Iniciando test del sistema...");
+    addLog("🧪 Iniciando test completo del sistema...");
+    
+    // Mostrar "Testeando el Sistema" en LCD
+    updateLCDTesting();
     
     // Test LEDs
     for (int i = 0; i < 3; i++) {
@@ -270,12 +454,55 @@ void handleTestButton() {
     // Leer sensores durante test
     sampleSensors();
     
-    // Apagar LEDs
+    // Test de bomba
+    bool pumpTestOK = true;
+    bool originalPumpState = pumpState;
+    bool originalManualMode = manualPumpControl;
+    
+    // Encender bomba brevemente para test
+    setPumpState(true, "Test del sistema");
+    delay(1000);
+    pumpTestOK = (digitalRead(PUMP_PIN) == HIGH);
+    setPumpState(false, "Test del sistema");
+    
+    // Restaurar estado original
+    if (!originalPumpState) {
+      setPumpState(false, "Restaurando estado");
+    }
+    manualPumpControl = originalManualMode;
+    
+    // Test de sensores
+    bool sensorsTestOK = true;
+    for (int i = 0; i < 3; i++) {
+      if (digitalRead(SENSOR_PINS[i]) == HIGH) { // Si está HIGH, podría indicar problema
+        sensorsTestOK = false;
+        break;
+      }
+    }
+    
+    // Test WiFi
+    bool wifiTestOK = (WiFi.status() == WL_CONNECTED);
+    
+    // Mostrar resultados en OLED y LCD
+    showTestResultOnOLED(sensorsTestOK, pumpTestOK, wifiTestOK);
+    updateLCDTestResult(sensorsTestOK, pumpTestOK, wifiTestOK);
+    
+    // Apagar LEDs de test
     for (int i = 0; i < 3; i++) digitalWrite(WATER_LEVEL_LEDS[i], LOW);
     digitalWrite(PUMP_LED_PIN, LOW);
     
+    // Restaurar LEDs normales
     updateLEDs();
-    addLog("🧪 Test completado");
+    
+    // Log resultados
+    addLog("🧪 Test completado - Sensores: " + String(sensorsTestOK ? "OK" : "FALLO") + 
+           ", Bomba: " + String(pumpTestOK ? "OK" : "FALLO") + 
+           ", WiFi: " + String(wifiTestOK ? "OK" : "FALLO"));
+    
+    // Mantener resultado en pantallas por 5 segundos
+    delay(5000);
+    updateOLED();
+    updateLCDNormal();
   }
   lastState = reading;
 }
@@ -287,6 +514,7 @@ void handleStatusAPI() {
   doc["foam"] = foamPercent;
   doc["pump"] = pumpState;
   doc["shutdown"] = systemShutdown;
+  doc["manualMode"] = manualPumpControl;
   doc["foamTh"] = FOAM_THRESHOLD;
   doc["timestamp"] = getDateTime();
   
@@ -362,10 +590,13 @@ void setupWebServer() {
     
     if (action == "on" && !systemShutdown) {
       setPumpState(true, "Control Web");
-      response = "{\"status\":\"ok\",\"message\":\"Bomba encendida\"}";
+      response = "{\"status\":\"ok\",\"message\":\"Bomba encendida - Modo Manual\",\"manualMode\":true}";
     } else if (action == "off") {
       setPumpState(false, "Control Web");
-      response = "{\"status\":\"ok\",\"message\":\"Bomba apagada\"}";
+      response = "{\"status\":\"ok\",\"message\":\"Bomba apagada - Modo Manual\",\"manualMode\":true}";
+    } else if (action == "auto") {
+      manualPumpControl = false;
+      response = "{\"status\":\"ok\",\"message\":\"Modo Automático activado\",\"manualMode\":false}";
     } else {
       response = "{\"error\":\"Acción inválida o sistema apagado\"}";
     }
@@ -387,7 +618,8 @@ void sendCompleteStatusToTelegram(String chat_id = TELEGRAM_CHAT_ID) {
   
   message += "⚡ *ACTUADORES:*\n";
   message += "• Bomba: " + String(pumpState ? "✅ ENCENDIDA" : "❌ APAGADA") + "\n";
-  message += "• Sistema: " + String(systemShutdown ? "🔴 APAGADO" : "🟢 ACTIVO") + "\n\n";
+  message += "• Sistema: " + String(systemShutdown ? "🔴 APAGADO" : "🟢 ACTIVO") + "\n";
+  message += "• Modo: " + String(manualPumpControl ? "🔧 MANUAL" : "🤖 AUTOMÁTICO") + "\n\n";
   
   message += "⏰ " + getDateTime();
   
@@ -406,6 +638,7 @@ void processTelegramCommand(const String &text, const String &chat_id) {
     reply += "🖥️ /infodevices - Info del dispositivo\n";
     reply += "⚙️ /pump_on - Encender bomba manualmente\n";
     reply += "🛑 /pump_off - Apagar bomba manualmente\n";
+    reply += "🤖 /auto_mode - Volver a modo automático\n";
     reply += "🔧 /test - Test del sistema\n";
     
     bot.sendMessage(chat_id, reply, "Markdown");
@@ -425,6 +658,7 @@ void processTelegramCommand(const String &text, const String &chat_id) {
     message += "🔌 Sistema: " + String(systemShutdown ? "APAGADO 🔴" : "ACTIVO 🟢") + "\n";
     message += "💧 Nivel Agua: " + String(waterLevelPercent) + "%\n";
     message += "🌿 Biomasa: " + String(foamPercent) + "%\n";
+    message += "🔧 Modo: " + String(manualPumpControl ? "MANUAL" : "AUTOMÁTICO") + "\n";
     message += "⏰ " + getDateTime();
     
     bot.sendMessage(chat_id, message, "Markdown");
@@ -450,13 +684,19 @@ void processTelegramCommand(const String &text, const String &chat_id) {
 
   if (cmd == "/pump_on" && !systemShutdown) {
     setPumpState(true, "Comando Telegram");
-    bot.sendMessage(chat_id, "✅ *Bomba encendida manualmente*", "Markdown");
+    bot.sendMessage(chat_id, "✅ *Bomba encendida manualmente*\n🔧 *Modo Manual activado*", "Markdown");
     return;
   } 
 
   if (cmd == "/pump_off") {
     setPumpState(false, "Comando Telegram");
-    bot.sendMessage(chat_id, "🛑 *Bomba apagada manualmente*", "Markdown");
+    bot.sendMessage(chat_id, "🛑 *Bomba apagada manualmente*\n🔧 *Modo Manual activado*", "Markdown");
+    return;
+  }
+
+  if (cmd == "/auto_mode") {
+    manualPumpControl = false;
+    bot.sendMessage(chat_id, "🤖 *Modo automático activado*\nEl sistema ahora controlará la bomba automáticamente", "Markdown");
     return;
   }
 
@@ -492,17 +732,25 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\n🚀 Iniciando BINASAMAN...");
   
-  // Configurar pines
+  // Configurar pines CORREGIDOS
   for (int i = 0; i < 3; i++) {
-    pinMode(SENSOR_PINS[i], INPUT_PULLUP);
-    pinMode(WATER_LEVEL_LEDS[i], OUTPUT);
+    pinMode(SENSOR_PINS[i], INPUT_PULLUP);      // Sensores como entrada
+    pinMode(WATER_LEVEL_LEDS[i], OUTPUT);       // LEDs como salida
     digitalWrite(WATER_LEVEL_LEDS[i], LOW);
   }
   
   pinMode(PUMP_PIN, OUTPUT);
   digitalWrite(PUMP_PIN, LOW);
+  pinMode(PUMP_LED_PIN, OUTPUT);
+  digitalWrite(PUMP_LED_PIN, LOW);
   pinMode(SHUTDOWN_BUTTON_PIN, INPUT_PULLUP);
   pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
+
+  // Inicializar OLED
+  initOLED();
+
+  // Inicializar LCD
+  initLCD();
 
   // SPIFFS
   if (!SPIFFS.begin(true)) {
@@ -540,7 +788,7 @@ void setup() {
   secureClient.setInsecure();
 
   // Mensaje de inicio
-  String startMsg = "⚙️ *Sistema Iniciado: Monitoreo de DHT22*\n\n";
+  String startMsg = "⚙️ *Sistema Iniciado: Proyecto Binasa*\n\n";
   startMsg += "🔧 Motivo: ⚙ Power On\n";
   startMsg += "🌍 IP: " + WiFi.localIP().toString() + "\n";
   startMsg += "📶 WiFi: " + WiFi.SSID() + "\n";
@@ -582,6 +830,20 @@ void loop() {
     updateLEDs();
   }
 
+  // OLED (cada 2 segundos)
+  static unsigned long lastOLED = 0;
+  if (now - lastOLED >= 2000) {
+    lastOLED = now;
+    updateOLED();
+  }
+
+  // LCD (cada 3 segundos)
+  static unsigned long lastLCD = 0;
+  if (now - lastLCD >= 3000) {
+    lastLCD = now;
+    updateLCDNormal();
+  }
+
   // Google Sheets (cada 5 minutos)
   if (!systemShutdown && (now - lastSheetSend >= SHEETS_INTERVAL_MS)) {
     lastSheetSend = now;
@@ -607,6 +869,7 @@ void loop() {
       report += "💧 Nivel Agua: " + String(waterLevelPercent) + "%\n";
       report += "🌿 Nivel Biomasa: " + String(foamPercent) + "%\n";
       report += "⚙️ Bomba: " + String(pumpState ? "ENCENDIDA" : "APAGADA") + "\n";
+      report += "🔧 Modo: " + String(manualPumpControl ? "MANUAL" : "AUTOMÁTICO") + "\n";
       report += "⏰ " + getDateTime();
       bot.sendMessage(TELEGRAM_CHAT_ID, report, "Markdown");
     }
