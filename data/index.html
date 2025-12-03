@@ -29,19 +29,37 @@
         <div class="card">
             <h2>🛠 Bomba</h2>
             <p id="pumpState" class="value">OFF</p>
+            <small id="pumpMode">Modo: AUTO</small>
         </div>
 
-        <!-- Sensor óptico -->
+        <!-- Sensor de Vinaza -->
         <div class="card">
-            <h2>🔦 Sensor Óptico (TCRT5000)</h2>
-            <p id="valorOptico" class="value">0%</p>
+            <h2>🌿 Vinaza Detectada</h2>
+            <p id="valorVinaza" class="value">0%</p>
+            <small id="vinazaStatus">Sin vinaza</small>
+        </div>
+
+        <!-- Estado del Sistema -->
+        <div class="card">
+            <h2>📊 Estado Sistema</h2>
+            <p id="systemStatus">ACTIVO</p>
+            <small id="sensorsCount">Sensores: 0/3</small>
         </div>
 
     </section>
 
-    <!-- Botones -->
-    <button id="btnGrafica" class="btn">📊 Ver gráfica diaria</button>
-    <button id="btnActuador" class="btn">⚙️ Actuador</button>
+    <!-- Controles -->
+    <div class="controls">
+        <button id="btnGrafica" class="btn">📊 Ver gráfica diaria</button>
+        <button id="btnActuador" class="btn">⚙️ Control Bomba</button>
+        <button id="btnModo" class="btn">🤖 Cambiar Modo</button>
+        <button id="btnRefresh" class="btn">🔄 Actualizar</button>
+    </div>
+
+    <footer>
+        <p id="lastUpdate">Última actualización: --:--:--</p>
+        <p id="ipAddress">IP: Conectando...</p>
+    </footer>
 
     <script src="/script.js"></script>
 </body>

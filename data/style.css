@@ -1,69 +1,197 @@
 body {
-    background: #f4f4f4;
-    font-family: Arial, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     margin: 0;
     padding: 0;
+    min-height: 100vh;
+    color: #333;
 }
 
 header {
-    background: #2c3e50;
+    background: rgba(0, 0, 0, 0.7);
     padding: 20px;
     color: white;
     text-align: center;
     margin: 0;
+    backdrop-filter: blur(10px);
+}
+
+header h1 {
+    margin: 0;
+    font-size: 2.5em;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.3);
 }
 
 .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     gap: 20px;
-    padding: 20px;
+    padding: 30px;
+    max-width: 1200px;
+    margin: 0 auto;
 }
 
 .card {
-    background: white;
-    padding: 20px;
-    border-radius: 12px;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    background: rgba(255, 255, 255, 0.9);
+    padding: 25px;
+    border-radius: 15px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.2);
     text-align: center;
-    transition: transform 0.2s;
+    transition: all 0.3s ease;
+    border: 1px solid rgba(255, 255, 255, 0.3);
 }
 
 .card:hover {
-    transform: translateY(-2px);
+    transform: translateY(-5px);
+    box-shadow: 0 8px 25px rgba(0,0,0,0.3);
+    background: white;
+}
+
+.card h2 {
+    margin: 0 0 15px 0;
+    color: #2c3e50;
+    font-size: 1.4em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
 }
 
 .value {
-    font-size: 2em;
+    font-size: 2.5em;
     font-weight: bold;
     margin: 10px 0;
-    color: #2c3e50;
+    transition: color 0.3s;
 }
 
-.btn {
-    display: block;
-    width: 90%;
-    max-width: 300px;
-    margin: 20px auto;
-    padding: 15px;
-    font-size: 1.1em;
-    border: none;
-    background: #3498db;
-    color: white;
-    border-radius: 10px;
-    cursor: pointer;
-    transition: background 0.3s;
+/* Colores específicos */
+#nivelAgua {
+    color: #3498db;
 }
 
-.btn:hover {
-    background: #2980b9;
-}
-
-/* Estados de la bomba */
 #pumpState {
-    color: #e74c3c; /* Rojo cuando está OFF */
+    color: #e74c3c;
 }
 
 #pumpState.on {
-    color: #27ae60; /* Verde cuando está ON */
+    color: #27ae60;
+}
+
+#valorVinaza {
+    color: #f39c12;
+}
+
+#valorVinaza.high {
+    color: #e74c3c;
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.7; }
+    100% { opacity: 1; }
+}
+
+#systemStatus {
+    color: #2c3e50;
+    font-size: 1.8em;
+}
+
+#systemStatus.shutdown {
+    color: #e74c3c;
+}
+
+.controls {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+    flex-wrap: wrap;
+    padding: 20px;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.btn {
+    padding: 12px 25px;
+    font-size: 1em;
+    border: none;
+    background: rgba(255, 255, 255, 0.2);
+    color: white;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.3s;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    backdrop-filter: blur(10px);
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.btn:hover {
+    background: rgba(255, 255, 255, 0.3);
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+}
+
+#btnActuador {
+    background: rgba(52, 152, 219, 0.8);
+}
+
+#btnModo {
+    background: rgba(155, 89, 182, 0.8);
+}
+
+#btnRefresh {
+    background: rgba(46, 204, 113, 0.8);
+}
+
+footer {
+    text-align: center;
+    padding: 20px;
+    color: white;
+    background: rgba(0, 0, 0, 0.5);
+    margin-top: 30px;
+}
+
+footer p {
+    margin: 5px 0;
+}
+
+#lastUpdate {
+    font-size: 0.9em;
+    opacity: 0.9;
+}
+
+#ipAddress {
+    font-family: monospace;
+    background: rgba(0,0,0,0.3);
+    padding: 5px 10px;
+    border-radius: 5px;
+    display: inline-block;
+}
+
+.card small {
+    display: block;
+    margin-top: 8px;
+    color: #7f8c8d;
+    font-size: 0.9em;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .grid {
+        grid-template-columns: 1fr;
+        padding: 15px;
+    }
+    
+    .controls {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .btn {
+        width: 80%;
+    }
 }
