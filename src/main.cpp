@@ -16,16 +16,16 @@
 // === CONFIGURACIÓN ===
 const String TELEGRAM_TOKEN = "8561349984:AAEeukrg0mnGVkTtfDC_Dk143XyuyWsvJSA";
 const String TELEGRAM_CHAT_ID = "-1003421846114";
-const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzqRpKe_OxUThm55BF1boHAyxybUYhJ7goD0jGE3nNp-P-kkCTi3i66UUBQgasqTsgB8g/exec";
+const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxQKQSLShT6hTjKenibGDuA3QVQ9Azs2pXkijkHMagFR4-7HiojG-6mswQ5rOLLotHjqg/exec";
 
 // === CONFIGURACIÓN DE PINES ===
 const int SENSOR_PINS[3] = {32, 14, 27};        // Sensores de agua
-const int FOAM_SENSOR_PIN = 5;                   // TCR5000 en GPIO5 (DIGITAL)
-const int PUMP_PIN = 25;                         // Bomba/MOSFET en GPIO25 (LOW = ACTIVADO para relé LOW-Trigger)
-const int WATER_LEVEL_LEDS[3] = {16, 26, 33};    // LEDs nivel agua  
-const int PUMP_LED_PIN = 15;                     // LED bomba
-const int SHUTDOWN_BUTTON_PIN = 4;               // Botón apagado (GPIO4 para evitar conflicto)
-const int TEST_BUTTON_PIN = 18;                  // Botón test
+const int FOAM_SENSOR_PIN = 5;                  // TCR5000 en GPIO5 (DIGITAL) - CORREGIDO
+const int PUMP_PIN = 17;                        // Bomba/MOSFET en GPIO25 (LOW = ACTIVADO para relé LOW-Trigger)
+const int WATER_LEVEL_LEDS[3] = {16, 26, 33};   // LEDs nivel agua  
+const int PUMP_LED_PIN = 15;                    // LED bomba
+const int SHUTDOWN_BUTTON_PIN = 4;              // Botón apagado (GPIO4 para evitar conflicto)
+const int TEST_BUTTON_PIN = 18;                 // Botón test
 
 // Configuración OLED
 #define SCREEN_WIDTH 128
@@ -45,6 +45,9 @@ unsigned long telegramReportIntervalMin = 30;
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -3 * 3600;
 const int daylightOffset_sec = 0;
+
+unsigned long lastChangeTime = 0;
+const unsigned long debounceMs = 60;
 
 // === VARIABLES GLOBALES ===
 WebServer server(80);
@@ -216,47 +219,11 @@ void checkAllConnections() {
 }
 
 // === SENSORES ===
-int readFoamSensor() {
-  // Lectura digital del sensor TCR5000 en GPIO5
-  // HIGH = no detección, LOW = detección (depende de conexión)
-  // Normalmente HIGH cuando no hay espuma, LOW cuando hay espuma
-  int sensorValue = digitalRead(FOAM_SENSOR_PIN);
-  
-  // Para TCR5000: 1 = detecta reflexión (hay espuma), 0 = no detecta
-  foamValue = sensorValue;
-  
-  // Convertir a porcentaje para mostrar
-  // Si sensorValue = 1 -> hay vinaza/espuma (100%)
-  // Si sensorValue = 0 -> no hay vinaza/espuma (0%)
-  foamPercent = (foamValue == HIGH) ? 100 : 0;
-  
-  return foamPercent;
-}
-
 int computeWaterPercent(bool low, bool mid, bool high) {
   if (high) return 100;
   if (mid) return 50;
   if (low) return 25;
   return 0;
-}
-
-void setPumpState(bool on, const String &reason = "") {
-  if (on == pumpState || systemShutdown) return;
-  
-  pumpState = on;
-  
-  if (reason == "Control Web" || reason == "Comando Telegram" || reason == "WebSocket") {
-    manualPumpControl = true;
-  } else if (reason.indexOf("automática") >= 0) {
-    manualPumpControl = false;
-  }
-  
-  // Para relé LOW-Trigger: LOW = activado, HIGH = desactivado
-  digitalWrite(PUMP_PIN, pumpState ? LOW : HIGH);
-  digitalWrite(PUMP_LED_PIN, pumpState);
-  
-  addLog("Bomba " + String(pumpState ? "ON" : "OFF") + " - " + reason);
-  dataChanged = true;
 }
 
 void updateLEDs() {
@@ -304,8 +271,32 @@ void broadcastWS() {
   webSocket.broadcastTXT(out);
 }
 
+// === SENSORES ===
+void setPumpState(bool on, const String &reason = "") {
+  if (on == pumpState || systemShutdown) return;
+  
+  pumpState = on;
+  
+  if (reason == "Control Web" || reason == "Comando Telegram" || reason == "WebSocket") {
+    manualPumpControl = true;
+  } else if (reason.indexOf("automática") >= 0 || reason.indexOf("TCR5000") >= 0) {
+    manualPumpControl = false;
+  }
+  
+  // Para relé LOW-Trigger: LOW = activado, HIGH = desactivado
+  digitalWrite(PUMP_PIN, pumpState ? LOW : HIGH);
+  digitalWrite(PUMP_LED_PIN, pumpState);
+  
+  addLog("Bomba " + String(pumpState ? "ON" : "OFF") + " - " + reason);
+  dataChanged = true;
+}
+
 void sampleSensors() {
-  // Sensores de agua
+  static unsigned long lastDebounceTime = 0;
+  static bool lastSensorReading = HIGH;
+  static bool stableSensorState = HIGH;
+  
+  // 1. Sensores de agua (SOLO para mostrar nivel)
   bool s0 = (digitalRead(SENSOR_PINS[0]) == LOW);
   bool s1 = (digitalRead(SENSOR_PINS[1]) == LOW);
   bool s2 = (digitalRead(SENSOR_PINS[2]) == LOW);
@@ -320,21 +311,55 @@ void sampleSensors() {
     dataChanged = true;
   }
 
-  // Sensor de vinaza/espuma - lectura digital
-  int newFoam = readFoamSensor();
-  if (newFoam != foamPercent) {
-    foamPercent = newFoam;
-    dataChanged = true;
+  // 2. Sensor TCR5000 - ¡ESTA ES LA PARTE IMPORTANTE!
+  int raw = digitalRead(FOAM_SENSOR_PIN);
+  
+  // DEBUG: Ver valor crudo del sensor
+  static int lastRawDebug = -1;
+  if (raw != lastRawDebug) {
+    Serial.printf("[TCR5000 RAW] Valor: %d (LOW=detecta, HIGH=no detecta)\n", raw);
+    lastRawDebug = raw;
   }
-
-  // Control automático: si sensor detecta 1 (vinaza), activar bomba
-  if (!systemShutdown && !manualPumpControl) {
-    // foamValue = 1 significa que el sensor detectó vinaza/espuma
-    if (foamValue == HIGH && !pumpState) {
-      setPumpState(true, "Detección automática de vinaza");
-    } else if (foamValue == LOW && pumpState) {
-      // Solo apagar bomba si ya no hay vinaza
-      setPumpState(false, "Vinaza controlada");
+  
+  // Debounce
+  if (raw != lastSensorReading) {
+    lastDebounceTime = millis();
+    lastSensorReading = raw;
+  }
+  
+  if ((millis() - lastDebounceTime) > debounceMs) {
+    if (raw != stableSensorState) {
+      stableSensorState = raw;
+      
+      // Actualizar variables para visualización
+      foamValue = stableSensorState;
+      // LOW = sensor detecta superficie → 100%
+      // HIGH = sensor NO detecta → 0%
+      foamPercent = (foamValue == LOW) ? 100 : 0;
+      
+      // ¡¡¡CONTROL AUTOMÁTICO DE LA BOMBA!!!
+      if (!systemShutdown && !manualPumpControl) {
+        // LÓGICA CORREGIDA:
+        // Cuando el sensor DETECTA (LOW) → Bomba ON
+        // Cuando el sensor NO DETECTA (HIGH) → Bomba OFF
+        
+        if (stableSensorState == LOW) {
+          // SENSOR DETECTA SUPERFICIE
+          if (!pumpState) {
+            Serial.println("[TCR5000] ¡DETECTADO! Activando bomba...");
+            setPumpState(true, "Detección TCR5000");
+          }
+        } else {
+          // SENSOR NO DETECTA
+          if (pumpState) {
+            Serial.println("[TCR5000] NO detectado. Apagando bomba...");
+            setPumpState(false, "Sin detección TCR5000");
+          }
+        }
+      }
+      
+      dataChanged = true;
+      addLog("Sensor TCR5000: " + String(stableSensorState == LOW ? "DETECTA" : "NO DETECTA"));
     }
   }
 }
@@ -627,14 +652,28 @@ void setup() {
   
   // Configurar bomba con relé LOW-Trigger (LOW = ON, HIGH = OFF)
   pinMode(PUMP_PIN, OUTPUT);
-  digitalWrite(PUMP_PIN, HIGH);  // Inicialmente apagada (HIGH para relé LOW-Trigger)
+  digitalWrite(PUMP_PIN, HIGH);  // Inicialmente APAGADA
   
   pinMode(PUMP_LED_PIN, OUTPUT);
   digitalWrite(PUMP_LED_PIN, LOW);
   pinMode(SHUTDOWN_BUTTON_PIN, INPUT_PULLUP);
   pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(FOAM_SENSOR_PIN, INPUT);  // TCR5000 en GPIO5 como digital
-
+  pinMode(FOAM_SENSOR_PIN, INPUT);  // TCR5000 sin pull-up
+  
+  // VERIFICACIÓN CRÍTICA DEL TCR5000
+  Serial.println("\n=== VERIFICACIÓN TCR5000 ===");
+  delay(100);
+  int sensorInitial = digitalRead(FOAM_SENSOR_PIN);
+  Serial.printf("Estado inicial TCR5000 (GPIO5): %d\n", sensorInitial);
+  Serial.println("LOW = sensor detecta (superficie cerca)");
+  Serial.println("HIGH = sensor NO detecta (sin superficie)");
+  Serial.println("=== FIN VERIFICACIÓN ===\n");
+  if (sensorInitial != HIGH && sensorInitial != LOW) {
+    Serial.println("ERROR: Lectura inválida del TCR5000. Verifica conexiones.");
+    while (true) {
+      delay(1000);
+    }
+}
   // Inicializar displays
   initOLED();
   initLCD();
@@ -726,15 +765,21 @@ void loop() {
 
   unsigned long now = millis();
 
-  // Verificar conexiones cada 5 segundos
-  if (now - lastConnectionCheck >= 5000) {
-    lastConnectionCheck = now;
-    checkAllConnections();
+  // DEBUG del estado cada 3 segundos
+  static unsigned long lastDebug = 0;
+  if (now - lastDebug >= 3000) {
+    lastDebug = now;
+    Serial.printf("[DEBUG] TCR5000: %d, Bomba: %s, Manual: %s, Shutdown: %s\n",
+                  digitalRead(FOAM_SENSOR_PIN),
+                  pumpState ? "ON" : "OFF",
+                  manualPumpControl ? "SI" : "NO",
+                  systemShutdown ? "SI" : "NO");
+                  
   }
 
-  // Sensores cada 1 segundo
+  // Sensores cada 1 segundo (INCLUYE TCR5000 CON DEBOUNCE)
   static unsigned long lastSensor = 0;
-  if (!systemShutdown && (now - lastSensor >= 1000)) {
+  if (!systemShutdown && (now - lastSensor >= 300)) {
     lastSensor = now;
     sampleSensors();
     checkForChanges();
