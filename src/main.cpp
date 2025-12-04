@@ -16,7 +16,7 @@
 // === CONFIGURACIÓN ===
 const String TELEGRAM_TOKEN = "8561349984:AAEeukrg0mnGVkTtfDC_Dk143XyuyWsvJSA";
 const String TELEGRAM_CHAT_ID = "-1003421846114";
-const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxQKQSLShT6hTjKenibGDuA3QVQ9Azs2pXkijkHMagFR4-7HiojG-6mswQ5rOLLotHjqg/exec";
+const String GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzNBfhyNIXLme3hGhUazuk5Vi4YSHwf7DX8OLePAfcgTVfZIlNl4GZIvlmRvXq2QcuIiQ/exec";
 
 // === CONFIGURACIÓN DE PINES ===
 const int SENSOR_PINS[3] = {32, 14, 27};        // Sensores de agua
@@ -367,27 +367,46 @@ void sampleSensors() {
 // === GOOGLE SHEETS ===
 void sendToGoogleSheets() {
   if (WiFi.status() != WL_CONNECTED || systemShutdown) return;
-  
+
   HTTPClient http;
-  
-  String fullURL = GOOGLE_SCRIPT_URL;
-  fullURL += "?date=" + getDate();
-  fullURL += "&time=" + getTime();
-  fullURL += "&water=" + String(waterLevelPercent);
-  fullURL += "&foam=" + String(foamPercent);
-  fullURL += "&pump=" + String(pumpState ? "1" : "0");
+
+  String url = GOOGLE_SCRIPT_URL;
+  url += "?date=" + getDate();
+  url += "&time=" + getTime();
+  url += "&water=" + String(waterLevelPercent);
+  url += "&foam=" + String(foamPercent);
+  url += "&pump=" + String(pumpState ? "1" : "0");
+
+  Serial.println("[Sheets] Enviando a: " + url);
 
   http.setTimeout(10000);
-  http.setReuse(true);
-  http.begin(secureClient, fullURL);
-  
-  int httpCode = http.GET();
-  
-  if (httpCode == 200) {
-    addLog("Sheets: OK");
-  } else {
-    addLog("Sheets Error: " + String(httpCode));
+  http.setReuse(false);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); 
+
+  // Usar secureClient para HTTPS
+  if (!http.begin(secureClient, url)) {
+    Serial.println("[Sheets] http.begin fallo");
+    return;
   }
+
+  // GET
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    String response = http.getString();
+    Serial.printf("[Sheets] HTTP Code: %d\n", httpCode);
+    Serial.print("[Sheets] Respuesta (inicio): ");
+    Serial.println(response.substring(0, min(200, (int)response.length())));
+    if (httpCode == 200) {
+      addLog("Sheets: Datos enviados OK");
+    } else {
+      addLog("Sheets Error: " + String(httpCode));
+    }
+  } else {
+    Serial.printf("[Sheets] Error HTTP: %d - %s\n", httpCode, http.errorToString(httpCode).c_str());
+    addLog("Sheets: Error de conexión");
+  }
+
   http.end();
 }
 

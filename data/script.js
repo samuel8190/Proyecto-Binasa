@@ -2,8 +2,8 @@
 // CONFIG
 // =============================
 const API_STATUS = "/status";
-const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzqRpKe_OxUThm55BF1boHAyxybUYhJ7goD0jGE3nNp-P-kkCTi3i66UUBQgasqTsgB8g/exec";
-const WS_URL = `ws://${window.location.hostname}:81`;
+const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzNBfhyNIXLme3hGhUazuk5Vi4YSHwf7DX8OLePAfcgTVfZIlNl4GZIvlmRvXq2QcuIiQ/exec";
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':81';
 
 // Variables globales
 let pumpState = false;
@@ -186,15 +186,15 @@ document.getElementById("btnActuador").addEventListener("click", async () => {
 });
 
 // =============================
-// GRÁFICAS DESDE GOOGLE SHEETS
+// GRÁFICAS DESDE GOOGLE SHEETS - SOLO DATOS REALES
 // =============================
 document.getElementById("btnGrafica").addEventListener("click", async () => {
     try {
         const today = new Date().toISOString().split('T')[0];
         
         Swal.fire({
-            title: "📊 Cargando datos...",
-            text: "Conectando a Google Sheets",
+            title: "📊 Cargando datos históricos...",
+            text: "Obteniendo datos reales de Google Sheets",
             allowOutsideClick: false,
             showConfirmButton: false,
             willOpen: () => {
@@ -202,77 +202,98 @@ document.getElementById("btnGrafica").addEventListener("click", async () => {
             }
         });
         
-        // Llamar DIRECTAMENTE a Google Apps Script
+        console.log(`🔗 Solicitando datos para: ${today}`);
+        console.log(`URL: ${GOOGLE_SCRIPT_URL}?date=${today}`);
+        
+        // Hacer la petición
         const response = await fetch(`${GOOGLE_SCRIPT_URL}?date=${today}`);
         
         if (!response.ok) {
-            throw new Error('Error al conectar con Google Sheets');
+            throw new Error(`Error HTTP: ${response.status}`);
         }
         
         const historicalData = await response.json();
+        console.log("📊 Datos recibidos:", historicalData);
+        
+        // Verificar si es un array
+        if (!Array.isArray(historicalData)) {
+            if (historicalData && historicalData.status === "error") {
+                throw new Error(historicalData.message || "Error en el servidor");
+            }
+            throw new Error("Formato de datos incorrecto recibido del servidor");
+        }
         
         Swal.close();
         
-        // Verificar si son datos de ejemplo o reales
-        if (historicalData.status === "success") {
-            // Si el script devuelve el formato de éxito (para test)
-            Swal.fire({
-                icon: 'info',
-                title: 'Datos de ejemplo',
-                text: 'Mostrando datos de demostración. Los datos reales se guardan en Google Sheets.',
-                confirmButtonText: 'Entendido'
-            }).then(() => {
-                showSampleChart(today);
-            });
-        } else if (historicalData.length > 0) {
-            // Mostrar datos del gráfico
-            showChartWithData(historicalData, today);
-        } else {
-            // Sin datos, mostrar ejemplo
+        // Si no hay datos
+        if (historicalData.length === 0) {
             Swal.fire({
                 icon: 'info',
                 title: 'Sin datos históricos',
-                text: 'Mostrando datos de ejemplo. Los datos reales se están guardando en Google Sheets.',
-                confirmButtonText: 'Ver ejemplo'
-            }).then(() => {
-                showSampleChart(today);
+                text: `No hay registros para la fecha ${today} en Google Sheets.`,
+                footer: '<small>Los datos se guardan automáticamente cada minuto.</small>',
+                confirmButtonText: 'Aceptar'
             });
+            return;
         }
         
+        // Mostrar gráfico con datos reales
+        showChartWithData(historicalData, today);
+        
     } catch (error) {
-        console.error('Error al cargar gráfica:', error);
+        console.error('❌ Error al cargar gráfica:', error);
         Swal.fire({
             icon: 'error',
             title: 'Error de conexión',
-            text: 'No se pudieron cargar los datos de Google Sheets. Mostrando datos de ejemplo.',
-            confirmButtonText: 'Ver ejemplo'
-        }).then(() => {
-            const today = new Date().toISOString().split('T')[0];
-            showSampleChart(today);
+            text: 'No se pudieron cargar los datos históricos de Google Sheets.',
+            footer: `<small>Detalle: ${error.message}</small>`,
+            confirmButtonText: 'Aceptar'
         });
     }
 });
 
-// Función para mostrar gráfico con datos
+// Función para mostrar gráfico con datos REALES
 function showChartWithData(historicalData, date) {
     // Preparar datos
     const horas = historicalData.map(d => d.hora);
     const nivelesAgua = historicalData.map(d => d.agua);
     const nivelesVinaza = historicalData.map(d => d.espuma);
     
+    // Estadísticas
+    const maxAgua = Math.max(...nivelesAgua);
+    const minAgua = Math.min(...nivelesAgua);
+    const avgAgua = (nivelesAgua.reduce((a, b) => a + b, 0) / nivelesAgua.length).toFixed(1);
+    
+    const maxVinaza = Math.max(...nivelesVinaza);
+    const minVinaza = Math.min(...nivelesVinaza);
+    const avgVinaza = (nivelesVinaza.reduce((a, b) => a + b, 0) / nivelesVinaza.length).toFixed(1);
+    
     Swal.fire({
         title: `📊 Historial - ${date}`,
         html: `
-            <div style="width: 100%; max-width: 600px; margin: 0 auto;">
-                <canvas id="chartCanvas" width="500" height="350"></canvas>
+            <div style="width: 100%; max-width: 700px; margin: 0 auto;">
+                <canvas id="chartCanvas" width="600" height="350"></canvas>
             </div>
-            <div style="margin-top: 15px; text-align: center;">
-                <p style="color: #666; font-size: 0.9em;">
-                    📈 Datos cargados desde Google Sheets
+            <div style="margin-top: 15px; text-align: center; font-size: 0.9em;">
+                <div style="display: flex; justify-content: space-around; margin-bottom: 10px;">
+                    <div style="color: #3498db;">
+                        <strong>💧 Agua:</strong><br>
+                        Máx: ${maxAgua}% | Mín: ${minAgua}% | Prom: ${avgAgua}%
+                    </div>
+                    <div style="color: #f39c12;">
+                        <strong>🌿 Vinaza:</strong><br>
+                        Máx: ${maxVinaza}% | Mín: ${minVinaza}% | Prom: ${avgVinaza}%
+                    </div>
+                </div>
+                <p style="color: #666;">
+                    📈 ${historicalData.length} registros reales cargados desde Google Sheets
+                </p>
+                <p style="color: #27ae60; font-size: 0.8em;">
+                    Último registro: ${horas[horas.length-1]} - Agua: ${nivelesAgua[nivelesAgua.length-1]}% | Vinaza: ${nivelesVinaza[nivelesVinaza.length-1]}%
                 </p>
             </div>
         `,
-        width: 650,
+        width: 750,
         showConfirmButton: false,
         showCloseButton: true,
         didOpen: () => {
@@ -288,36 +309,77 @@ function showChartWithData(historicalData, date) {
                     labels: horas,
                     datasets: [
                         {
-                            label: '💧 Nivel de Agua',
+                            label: '💧 Nivel de Agua (%)',
                             data: nivelesAgua,
                             borderColor: '#3498db',
                             backgroundColor: 'rgba(52, 152, 219, 0.1)',
                             borderWidth: 3,
-                            tension: 0.3,
-                            fill: true
+                            tension: 0.2,
+                            fill: true,
+                            pointRadius: 3,
+                            pointHoverRadius: 6,
+                            pointBackgroundColor: '#3498db'
                         },
                         {
-                            label: '🌿 Vinaza Detectada',
+                            label: '🌿 Vinaza Detectada (%)',
                             data: nivelesVinaza,
                             borderColor: '#f39c12',
                             backgroundColor: 'rgba(243, 156, 18, 0.1)',
                             borderWidth: 3,
-                            tension: 0.3,
-                            fill: true
+                            tension: 0.2,
+                            fill: true,
+                            pointRadius: 3,
+                            pointHoverRadius: 6,
+                            pointBackgroundColor: '#f39c12'
                         }
                     ]
                 },
                 options: {
                     responsive: true,
+                    maintainAspectRatio: false,
                     plugins: {
                         legend: {
                             position: 'top',
+                            labels: {
+                                font: {
+                                    size: 12,
+                                    weight: 'bold'
+                                },
+                                padding: 20
+                            }
                         },
                         title: {
                             display: true,
-                            text: 'Historial desde Google Sheets',
+                            text: 'Historial de Datos - BinasaMan',
                             font: {
-                                size: 16
+                                size: 16,
+                                weight: 'bold'
+                            },
+                            padding: {
+                                top: 10,
+                                bottom: 30
+                            }
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                            titleFont: {
+                                size: 13
+                            },
+                            bodyFont: {
+                                size: 13
+                            },
+                            padding: 10,
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label = label.split(' (')[0] + ': ';
+                                    }
+                                    label += context.parsed.y + '%';
+                                    return label;
+                                }
                             }
                         }
                     },
@@ -329,7 +391,16 @@ function showChartWithData(historicalData, date) {
                                 display: true,
                                 text: 'Porcentaje (%)',
                                 font: {
+                                    size: 13,
                                     weight: 'bold'
+                                }
+                            },
+                            grid: {
+                                color: 'rgba(0,0,0,0.05)'
+                            },
+                            ticks: {
+                                font: {
+                                    size: 11
                                 }
                             }
                         },
@@ -338,10 +409,28 @@ function showChartWithData(historicalData, date) {
                                 display: true,
                                 text: 'Hora del día',
                                 font: {
+                                    size: 13,
                                     weight: 'bold'
                                 }
+                            },
+                            grid: {
+                                color: 'rgba(0,0,0,0.05)'
+                            },
+                            ticks: {
+                                font: {
+                                    size: 11
+                                },
+                                maxRotation: 45,
+                                minRotation: 45
                             }
                         }
+                    },
+                    interaction: {
+                        intersect: false,
+                        mode: 'index'
+                    },
+                    animation: {
+                        duration: 1000
                     }
                 }
             });
@@ -353,23 +442,6 @@ function showChartWithData(historicalData, date) {
             }
         }
     });
-}
-
-// Función para mostrar gráfico de ejemplo
-function showSampleChart(date) {
-    // Datos de ejemplo para demostración
-    const sampleData = [
-        {hora: "08:00", agua: 25, espuma: 10},
-        {hora: "10:00", agua: 50, espuma: 25},
-        {hora: "12:00", agua: 75, espuma: 40},
-        {hora: "14:00", agua: 100, espuma: 30},
-        {hora: "16:00", agua: 75, espuma: 15},
-        {hora: "18:00", agua: 50, espuma: 8},
-        {hora: "20:00", agua: 25, espuma: 5},
-        {hora: "22:00", agua: 0, espuma: 0}
-    ];
-    
-    showChartWithData(sampleData, date);
 }
 
 // =============================
